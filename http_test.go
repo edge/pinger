@@ -12,7 +12,10 @@ func doTestHTTP(a *assert.Assertions, pinger Pinger) *Packet {
 	if err := pinger.Connect(context.Background()); !a.Nil(err) {
 		return nil
 	}
-	defer pinger.Disconnect()
+	defer func() {
+		a.Nil(pinger.Disconnect())
+	}()
+
 	packet, err := pinger.Ping()
 	if !a.Nil(err) {
 		return nil

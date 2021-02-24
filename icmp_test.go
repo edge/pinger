@@ -19,7 +19,10 @@ func doTestICMP(a *assert.Assertions, pinger Pinger) *Packet {
 		}
 		return nil
 	}
-	defer pinger.Disconnect()
+	defer func() {
+		a.Nil(pinger.Disconnect())
+	}()
+
 	packet, err := pinger.Ping()
 	if err != nil {
 		netErr, ok := err.(*net.OpError)
