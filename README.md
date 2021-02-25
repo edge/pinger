@@ -12,4 +12,5 @@ Multiple drivers and middlewares are included to make it easy to build pinger ap
 | Middleware | [Errors()](./error.go) | Cause pinger to randomly (or always) fail. Useful for tests |
 | Driver | [HTTP()](./http.go) | Simple HTTP-based pinger using GET or HEAD |
 | Driver | [ICMP()](./icmp.go) | ICMP pinger. Requires root privileges |
+| Middleware | [Log()](./log.go) | Logger |
 | Middleware | [Track()](./stats.go) | Track ping statistics |
