@@ -6,6 +6,7 @@ import (
 	"math"
 	"math/rand"
 	"net"
+	"sync"
 	"syscall"
 	"time"
 
@@ -42,6 +43,8 @@ type icmpDriver struct {
 }
 
 type icmpMessageProvider struct {
+	mut *sync.Mutex
+
 	id      int
 	msgType icmp.Type
 	seq     int
@@ -75,6 +78,8 @@ func newICMPMessageProvider(h icmpProtocolHandler, addr *net.IPAddr) *icmpMessag
 	rng := rand.New(src)
 
 	return &icmpMessageProvider{
+		mut: &sync.Mutex{},
+
 		id:      rng.Intn(math.MaxInt16),
 		msgType: h.MessageType(),
 		seq:     0,
@@ -91,24 +96,27 @@ func newProtocolHandler(addr *net.IPAddr) (h icmpProtocolHandler) {
 	return
 }
 
-func (messageProvider *icmpMessageProvider) Provide(addr *net.IPAddr) *icmp.Message {
+func (p *icmpMessageProvider) Provide(addr *net.IPAddr) *icmp.Message {
+	p.mut.Lock()
+	defer p.mut.Unlock()
+
 	t := timeToBytes(time.Now())
-	t = append(t, intToBytes(messageProvider.tracker)...)
+	t = append(t, intToBytes(p.tracker)...)
 	if remainSize := timeSliceLength - trackerLength; remainSize > 0 {
 		t = append(t, bytes.Repeat([]byte{1}, remainSize)...)
 	}
 
 	msg := &icmp.Message{
-		Type: messageProvider.msgType,
+		Type: p.msgType,
 		Code: 0,
 		Body: &icmp.Echo{
-			ID:   messageProvider.id,
-			Seq:  messageProvider.seq,
+			ID:   p.id,
+			Seq:  p.seq,
 			Data: t,
 		},
 	}
 
-	messageProvider.seq++
+	p.seq++
 	return msg
 }
 
