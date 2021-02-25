@@ -10,7 +10,8 @@ import (
 )
 
 var (
-	// testStatsAllowMaxRTT is an upper bound to permit some variation in test timings, as we cannot ensure reported RTT average is exact.
+	// testStatsAllowMaxRTT is an upper bound to permit some variation in test timings.
+	// Unless the test machine is very slow, dummy packet RTTs should be within +3ms, but we allow +10ms to be safe.
 	testStatsAllowMaxRTT = 60 * time.Millisecond
 
 	testStatsWaitTime = 50 * time.Millisecond

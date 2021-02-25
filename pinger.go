@@ -18,9 +18,9 @@ var (
 type Driver interface {
 	Address() net.Addr // Address to ping.
 
-	Connect(context.Context) error // Connect to host.
-	Disconnect() error             // Disconnect from host.
-	Ping() (RawPacket, error)      // Ping host.
+	Connect(context.Context) error  // Connect to host.
+	Disconnect() error              // Disconnect from host.
+	Ping(*Timer) (RawPacket, error) // Ping host.
 }
 
 // Pinger reflects a standard pinging API.
@@ -93,9 +93,8 @@ func (p *pinger) Disconnect() error {
 }
 
 func (p *pinger) Ping() (Packet, error) {
-	sentTime := time.Now()
-	raw, err := p.driver.Ping()
-	completeTime := time.Now()
+	timer := &Timer{}
+	raw, err := p.driver.Ping(timer)
 	if err != nil {
 		return Packet{}, err
 	}
@@ -105,8 +104,8 @@ func (p *pinger) Ping() (Packet, error) {
 			Address: p.driver.Address(),
 		},
 		TimedPacket: TimedPacket{
-			RTT:  completeTime.Sub(sentTime),
-			Sent: sentTime,
+			RTT:  timer.Elapsed(),
+			Sent: timer.Started,
 		},
 	}
 

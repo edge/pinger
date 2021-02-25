@@ -40,10 +40,12 @@ func (d *dummyDriver) Disconnect() error {
 	return nil
 }
 
-func (d *dummyDriver) Ping() (RawPacket, error) {
+func (d *dummyDriver) Ping(timer *Timer) (RawPacket, error) {
 	raw := RawPacket{
 		Message: []byte{},
 	}
+	timer.Start()
 	time.Sleep(d.wait)
+	timer.Stop()
 	return raw, nil
 }

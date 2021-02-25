@@ -99,11 +99,11 @@ func (p *icmpDriver) Disconnect() error {
 	return err
 }
 
-func (p *icmpDriver) Ping() (RawPacket, error) {
+func (p *icmpDriver) Ping(timer *Timer) (RawPacket, error) {
 	errc := make(chan error, 1)
 	defer close(errc)
 	go func() {
-		if err := p.send(); err != nil {
+		if err := p.send(timer); err != nil {
 			errc <- err
 		}
 	}()
@@ -190,13 +190,14 @@ func (p *icmpDriver) recvPacket() (RawPacket, error) {
 	return raw, nil
 }
 
-func (p *icmpDriver) send() error {
+func (p *icmpDriver) send(timer *Timer) error {
 	msg := p.messageProvider.Provide()
 	msgBytes, err := msg.Marshal(nil)
 	if err != nil {
 		return err
 	}
 
+	timer.Start()
 	for {
 		_, err := p.packetConn.WriteTo(msgBytes, p.config.Addr)
 		if err != nil {
@@ -206,6 +207,7 @@ func (p *icmpDriver) send() error {
 			}
 			return err
 		}
+		timer.Stop()
 		return nil
 	}
 }

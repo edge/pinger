@@ -79,14 +79,14 @@ func (d *httpDriver) Disconnect() error {
 	return nil
 }
 
-func (d *httpDriver) Ping() (RawPacket, error) {
+func (d *httpDriver) Ping(timer *Timer) (RawPacket, error) {
 	errc := make(chan error, 1)
 	rawc := make(chan RawPacket, 1)
 	defer close(errc)
 	defer close(rawc)
 
 	go func() {
-		raw, err := d.send()
+		raw, err := d.send(timer)
 		if err != nil {
 			errc <- err
 		} else {
@@ -111,9 +111,11 @@ func (d *httpDriver) newRequest() *http.Request {
 	}
 }
 
-func (d *httpDriver) send() (RawPacket, error) {
+func (d *httpDriver) send(timer *Timer) (RawPacket, error) {
 	req := d.newRequest()
+	timer.Start()
 	res, err := d.client.Do(req)
+	timer.Stop()
 	if err != nil {
 		return RawPacket{}, err
 	}
