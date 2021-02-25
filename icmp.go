@@ -1,27 +1,29 @@
 package pinger
 
 import (
-	"bytes"
 	"context"
-	"math"
-	"math/rand"
+	"errors"
 	"net"
-	"sync"
 	"syscall"
 	"time"
 
 	"golang.org/x/net/icmp"
-	"golang.org/x/net/ipv4"
-	"golang.org/x/net/ipv6"
+)
+
+// ICMP internal error.
+var (
+	ErrICMPIgnoredPacket = errors.New("ignored packet")
 )
 
 const (
 	defaultReadTimeout = 100 * time.Millisecond
 )
 
+// Size in bytes of echo message component.
+// 8 bytes represents an int64.
 const (
-	timeSliceLength = 8
-	trackerLength   = 8
+	timeSize    = 8
+	trackerSize = 8
 )
 
 // ICMPConfig for an ICMP() pinger.
@@ -42,23 +44,13 @@ type icmpDriver struct {
 	chanRawPacket   chan RawPacket
 }
 
-type icmpMessageProvider struct {
-	mut *sync.Mutex
-
-	id      int
-	msgType icmp.Type
-	seq     int
-	tracker int64
-}
-
 type icmpProtocolHandler interface {
 	Listen(addr string) (*icmp.PacketConn, error)
-	MessageType() icmp.Type
+	Parse([]byte) (*icmp.Message, error)
 	Read(*icmp.PacketConn) (b []byte, nb int, ttl int, err error)
+	ReplyType() icmp.Type
+	RequestType() icmp.Type
 }
-
-type icmpIPv4Handler struct{}
-type icmpIPv6Handler struct{}
 
 // ICMP pinger.
 // This pinger requires the process to have root privileges.
@@ -73,20 +65,6 @@ func ICMP(cfg ICMPConfig) (Pinger, error) {
 	return p, nil
 }
 
-func newICMPMessageProvider(h icmpProtocolHandler, addr *net.IPAddr) *icmpMessageProvider {
-	src := rand.NewSource(time.Now().UnixNano())
-	rng := rand.New(src)
-
-	return &icmpMessageProvider{
-		mut: &sync.Mutex{},
-
-		id:      rng.Intn(math.MaxInt16),
-		msgType: h.MessageType(),
-		seq:     0,
-		tracker: rng.Int63n(math.MaxInt64),
-	}
-}
-
 func newProtocolHandler(addr *net.IPAddr) (h icmpProtocolHandler) {
 	if isIPv4(addr.IP) {
 		h = &icmpIPv4Handler{}
@@ -94,30 +72,6 @@ func newProtocolHandler(addr *net.IPAddr) (h icmpProtocolHandler) {
 		h = &icmpIPv6Handler{}
 	}
 	return
-}
-
-func (p *icmpMessageProvider) Provide(addr *net.IPAddr) *icmp.Message {
-	p.mut.Lock()
-	defer p.mut.Unlock()
-
-	t := timeToBytes(time.Now())
-	t = append(t, intToBytes(p.tracker)...)
-	if remainSize := timeSliceLength - trackerLength; remainSize > 0 {
-		t = append(t, bytes.Repeat([]byte{1}, remainSize)...)
-	}
-
-	msg := &icmp.Message{
-		Type: p.msgType,
-		Code: 0,
-		Body: &icmp.Echo{
-			ID:   p.id,
-			Seq:  p.seq,
-			Data: t,
-		},
-	}
-
-	p.seq++
-	return msg
 }
 
 func (p *icmpDriver) Address() net.Addr {
@@ -154,14 +108,50 @@ func (p *icmpDriver) Ping() (RawPacket, error) {
 		}
 	}()
 
-	select {
-	case <-p.ctx.Done():
-		return RawPacket{}, p.ctx.Err()
-	case err := <-errc:
-		return RawPacket{}, err
-	case packet := <-p.chanRawPacket:
-		return packet, nil
+	for {
+		select {
+		case <-p.ctx.Done():
+			return RawPacket{}, p.ctx.Err()
+		case err := <-errc:
+			return RawPacket{}, err
+		case raw := <-p.chanRawPacket:
+			if err := p.handlePacket(raw); err != nil {
+				if isICMPIgnoredPacket(err) {
+					continue
+				}
+				return RawPacket{}, err
+			}
+			return raw, nil
+		}
 	}
+}
+
+func (p *icmpDriver) handlePacket(raw RawPacket) error {
+	msg, err := p.protocolHandler.Parse(raw.Message)
+	if err != nil {
+		return err
+	}
+	echo := msg.Body.(*icmp.Echo)
+	// ignore if not echo reply
+	if msg.Type != p.protocolHandler.ReplyType() {
+		return ErrICMPIgnoredPacket
+	}
+	// ignore if id mismatched
+	if echo.ID != p.messageProvider.id {
+		return ErrICMPIgnoredPacket
+	}
+
+	track, _, err := p.messageProvider.ReadData(msg)
+	if err != nil {
+		return err
+	}
+	// ignore if tracker mismatched
+	if track != p.messageProvider.tracker {
+		return ErrICMPIgnoredPacket
+	}
+
+	// TODO: use ReadData 2nd return to set RTT
+	return nil
 }
 
 func (p *icmpDriver) recv() error {
@@ -171,7 +161,7 @@ func (p *icmpDriver) recv() error {
 		case <-p.ctx.Done():
 			return p.ctx.Err()
 		default:
-			packet, err := p.recvPacket()
+			raw, err := p.recvPacket()
 			if netErr, ok := err.(*net.OpError); ok {
 				if netErr.Timeout() {
 					continue
@@ -179,7 +169,7 @@ func (p *icmpDriver) recv() error {
 					return err
 				}
 			}
-			p.chanRawPacket <- packet
+			p.chanRawPacket <- raw
 		}
 	}
 }
@@ -192,16 +182,16 @@ func (p *icmpDriver) recvPacket() (RawPacket, error) {
 	if err != nil {
 		return RawPacket{}, err
 	}
-	packet := RawPacket{
+	raw := RawPacket{
 		Message: b,
 		Size:    nb,
 		TTL:     time.Duration(ttl),
 	}
-	return packet, nil
+	return raw, nil
 }
 
 func (p *icmpDriver) send() error {
-	msg := p.messageProvider.Provide(p.config.Addr)
+	msg := p.messageProvider.Provide()
 	msgBytes, err := msg.Marshal(nil)
 	if err != nil {
 		return err
@@ -220,56 +210,8 @@ func (p *icmpDriver) send() error {
 	}
 }
 
-func (h *icmpIPv4Handler) Listen(addr string) (conn *icmp.PacketConn, err error) {
-	ok := false
-	if conn, err = icmp.ListenPacket("ip4:icmp", addr); err == nil {
-		ok = true
-		err = conn.IPv4PacketConn().SetControlMessage(ipv4.FlagTTL, true)
-	}
-	if ok && err != nil {
-		conn.Close()
-		conn = nil
-	}
-	return
-}
-
-func (h *icmpIPv4Handler) MessageType() icmp.Type {
-	return ipv4.ICMPTypeEcho
-}
-
-func (h *icmpIPv4Handler) Read(conn *icmp.PacketConn) (b []byte, nb int, ttl int, err error) {
-	var cm *ipv4.ControlMessage
-	nb, cm, _, err = conn.IPv4PacketConn().ReadFrom(b)
-	if cm != nil {
-		ttl = cm.TTL
-	}
-	return
-}
-
-func (h *icmpIPv6Handler) Listen(addr string) (conn *icmp.PacketConn, err error) {
-	ok := false
-	if conn, err = icmp.ListenPacket("ip6:ipv6-icmp", addr); err == nil {
-		ok = true
-		err = conn.IPv6PacketConn().SetControlMessage(ipv6.FlagHopLimit, true)
-	}
-	if ok && err != nil {
-		conn.Close()
-		conn = nil
-	}
-	return
-}
-
-func (h *icmpIPv6Handler) MessageType() icmp.Type {
-	return ipv6.ICMPTypeEchoRequest
-}
-
-func (h *icmpIPv6Handler) Read(conn *icmp.PacketConn) (b []byte, nb int, ttl int, err error) {
-	var cm *ipv6.ControlMessage
-	nb, cm, _, err = conn.IPv6PacketConn().ReadFrom(b)
-	if cm != nil {
-		ttl = cm.HopLimit
-	}
-	return
+func isICMPIgnoredPacket(err error) bool {
+	return err == ErrICMPIgnoredPacket
 }
 
 func validateICMPConfig(cfg *ICMPConfig) error {
